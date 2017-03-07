@@ -33,6 +33,7 @@
 CMD_BASENAME="$(which basename)"
 CMD_SNMPGET="$(which snmpget)"
 CMD_SNMPWALK="$(which snmpwalk)"
+CMD_SNMPTABLE="$(which snmptable)"
 CMD_AWK="$(which awk)"
 CMD_GREP="$(which grep)"
 CMD_BC="$(which bc)"
@@ -69,6 +70,9 @@ OID_TEMPMIN="LCOS-MIB::lcsSetupTemperatureMonitorLowerLimitDegrees"
 #VPN Connections
 OID_VPN_CONNECTIONS="LCOS-MIB::lcsStatusVpnConnectionsEntryState"
 
+# WAN Througput
+OID_WAN_IF_THROUGHPUT="LCOS-MIB::lcsStatusWanThroughputTable"
+
 # Default variables
 DESCRIPTION="Unknown"
 STATE=$STATE_UNKNOWN
@@ -79,14 +83,16 @@ HOSTNAME="192.168.10.1"
 TASK=""
 WARNING=60
 CRITICAL=65
+INTERFACE=eVdsl1
 
 # Option processing
 print_usage() {
-  echo "Usage: ./check_snmp_cpu -H 192.168.0.1 -C public -w 60 -c 65"
+  echo "Usage: ./check_lancom -H 192.168.0.1 -T traffic -C public -w 60 -c 65 -I eVdsl1"
   echo "  $SCRIPTNAME -H ADDRESS"
   echo "  $SCRIPTNAME -C STRING"
   echo "  $SCRIPTNAME -w INTEGER"
   echo "  $SCRIPTNAME -c INTEGER"
+  echo "  $SCRIPTNAME -I STRING"
   echo "  $SCRIPTNAME -h"
   echo "  $SCRIPTNAME -V"
 }
@@ -108,13 +114,15 @@ print_help() {
   echo "-H ADDRESS"
   echo "   Name or IP address of host (default: 192.168.0.1)"
   echo "-T TASK"
-  echo "   Task to check. Must be in: temperature, cpu, memory"
+  echo "   Task to check. Must be in: temperature, cpu, memory, traffic"
   echo "-C STRING"
   echo "   Community name for the host SNMP agent (default: public)"
   echo "-w INTEGER"
   echo "   Warning level for memory usage in percent (default: 60)"
   echo "-c INTEGER"
   echo "   Critical level for memory usage in percent (default: 65)"
+  echo "-I INTEGER"
+  echo "   Interface to monitor traffic for (default: eVdsl1)"
   echo "-h"
   echo "   Print this help screen"
   echo "-V"
@@ -125,13 +133,13 @@ print_help() {
 
 # Plugin processing
 size_convert() {
-  if [ $VALUE -ge 1048576 ]; then
+  if [ $VALUE -ge  1073741824 ]; then
     VALUE=`echo "scale=2 ; ( ( $VALUE / 1024 ) / 1024 ) / 1024" | $CMD_BC`
     VALUE="$VALUE GB"
-  elif [ $VALUE -ge 1024 ]; then
+  elif [ $VALUE -ge 1048576 ]; then
     VALUE=`echo "scale=2 ; ( $VALUE / 1024 ) / 1024" | $CMD_BC`
     VALUE="$VALUE MB"
-  elif [ $VALUE -ge 0 ]; then
+  elif [ $VALUE -ge 1024 ]; then
     VALUE=`echo "scale=2 ; $VALUE / 1024" | $CMD_BC`
     VALUE="$VALUE KB"
   else
@@ -139,7 +147,7 @@ size_convert() {
   fi
 }
 
-while getopts H:T:C:w:c:hV OPT
+while getopts H:T:C:w:c:I:hV OPT
 do
   case $OPT in
     H) HOSTNAME="$OPTARG" ;;
@@ -147,6 +155,7 @@ do
     C) COMMUNITY="$OPTARG" ;;
     w) WARNING=$OPTARG ;;
     c) CRITICAL=$OPTARG ;;
+    I) INTERFACE=$OPTARG ;;
     h)
       print_help
       exit $STATE_UNKNOWN
@@ -257,20 +266,26 @@ if [ "$TASK" == "temperature" ]; then
 fi
 
 if [ "$TASK" == "vpn" ]; then
-	STATE=$STATE_UNKNOWN
-	CONNS=`$CMD_SNMPWALK -t 2 -r 2 -v 1 -c $COMMUNITY $HOSTNAME $OID_VPN_CONNECTIONS | $CMD_AWK '{ print $4 }'`
-	while read -r line; do
-		if [ $line != $STATE_CONNECTED ]; then
-			STATE=$STATE_CRITICAL
-			DESCRIPTION="VPN Connections : Critical. One or more connections are not in state connected."
-			exit $STATE_CRITICAL
-		else
-			STATE=$STATE_OK
-		fi
-	done <<< "$CONNS"
-	#echo $CONNS
-	DESCRIPTION="VPN Connections : OK"
+        ERROR_CONNS=""
+        STATE=$STATE_UNKNOWN
+        CONNS=`$CMD_SNMPWALK -t 2 -r 2 -v 1 -c $COMMUNITY $HOSTNAME $OID_VPN_CONNECTIONS`
+        while read -r line; do
+            VALUE=`$CMD_AWK -F" " '{ print $4 }' <<< "$line"`
+            CONN_NAME=`$CMD_AWK -F" " '{ print $1 }' <<< "$line"`
+            CONN_NAME=`$CMD_AWK -F" " '{ split($0,a,"."); print a[2]; }' <<< "$CONN_NAME"`
+            if [ $VALUE != $STATE_CONNECTED ]; then
+                ERROR_CONNS="$ERROR_CONNS $CONN_NAME"
+                STATE=$STATE_CRITICAL
+                DESCRIPTION="VPN Connections : Critical. The following conenctions are not in State Connected: $ERROR_CONNS"
+            fi
+        done <<< "$CONNS"
+        if [ $STATE != $STATE_CRITICAL ]; then
+            STATE=$STATE_OK
+            DESCRIPTION="VPN Connections : OK"
+        fi
+        #echo $CONNS
 fi
+
 
 echo $DESCRIPTION
 exit $STATE
